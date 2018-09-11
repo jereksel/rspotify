@@ -16,6 +16,12 @@ use std::io::Read;
 use std::string::String;
 use std::borrow::Cow;
 
+use std::borrow::Borrow;
+
+use std::collections::hash_map::DefaultHasher;
+
+extern crate std;
+
 use super::oauth2::SpotifyClientCredentials;
 use super::senum::{AlbumType, Type, TimeRange, Country, RepeatState, SearchType};
 use super::model::album::{FullAlbum, FullAlbums, SimplifiedAlbum, PageSimpliedAlbums, SavedAlbum};
@@ -33,16 +39,25 @@ use super::model::device::DevicePayload;
 use super::model::context::{FullPlayingContext, SimplifiedPlayingContext};
 use super::model::search::{SearchAlbums, SearchArtists, SearchTracks, SearchPlaylists};
 use super::util::convert_map_to_string;
+use reqwest::header::Raw;
+use std::sync::RwLock;
+use std::sync::Arc;
+use core::borrow::BorrowMut;
+use std::collections::BTreeMap;
+use std::hash::Hash;
+use std::hash::Hasher;
+
 lazy_static! {
     /// HTTP Client
     pub static ref CLIENT: Client = Client::new();
 }
 /// Spotify API object
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Spotify {
     pub prefix: String,
     pub access_token: Option<String>,
     pub client_credentials_manager: Option<SpotifyClientCredentials>,
+    cache: Arc<RwLock<HashMap<u64, Page<PlaylistTrack>>>>
 }
 impl Spotify {
     //! If you want to check examples of all API endpoint, you could check the
@@ -52,6 +67,7 @@ impl Spotify {
             prefix: "https://api.spotify.com/v1/".to_owned(),
             access_token: None,
             client_credentials_manager: None,
+            cache: Arc::new(RwLock::new(HashMap::new()))
         }
     }
 
@@ -133,6 +149,56 @@ impl Spotify {
                   &buf);
         }
     }
+
+    fn internal_call_etag(&self, method: Method, url: &str, payload: Option<&Value>) -> Result<(String, Option<String>), failure::Error> {
+        let mut url: Cow<str> = url.into();
+        if !url.starts_with("http") {
+            url = ["https://api.spotify.com/v1/", &url].concat().into();
+        }
+
+        let mut headers = Headers::new();
+        headers.set(self.auth_headers());
+        headers.set(ContentType::json());
+
+        let mut response = {
+            let mut builder = CLIENT.request(method, &url.into_owned());
+            builder.headers(headers);
+
+            // only add body if necessary
+            // spotify rejects GET requests that have a body with a 400 response
+            if let Some(json) = payload {
+                builder.json(json);
+            }
+
+            builder.send().unwrap()
+        };
+
+        let mut buf = String::new();
+
+        response
+            .read_to_string(&mut buf)
+            .expect("failed to read response");
+
+        let headers = response.headers();
+        let etag = headers.get_raw("Etag")
+            .and_then(|e| e.one())
+            .and_then(|e| std::str::from_utf8(e).ok())
+            .map(|e| e.to_string());
+
+        println!("{:?}", etag);
+
+        if response.status().is_success() {
+            Ok((buf, etag))
+        } else {
+            eprintln!("parameters: {:?}", &payload);
+            eprintln!("response: {:?}", &response);
+            eprintln!("content: {:?}", &buf);
+            bail!("send request failed, http code:{}, error message:{}",
+                  response.status(),
+                  &buf);
+        }
+    }
+
     ///send get request
     fn get(&self, url: &str, params: &mut HashMap<String, String>) -> Result<String, failure::Error> {
         if !params.is_empty() {
@@ -143,6 +209,19 @@ impl Spotify {
             self.internal_call(Get, &url_with_params, None)
         } else {
             self.internal_call(Get, url, None)
+        }
+    }
+
+    ///send get request
+    fn get_etag(&self, url: &str, params: &mut HashMap<String, String>) -> Result<(String, Option<String>), failure::Error> {
+        if !params.is_empty() {
+            let param: String = convert_map_to_string(params);
+            let mut url_with_params = url.to_owned();
+            url_with_params.push('?');
+            url_with_params.push_str(&param);
+            self.internal_call_etag(Get, &url_with_params, None)
+        } else {
+            self.internal_call_etag(Get, url, None)
         }
     }
 
@@ -581,7 +660,8 @@ impl Spotify {
          offset: O,
          market: Option<Country>)
          -> Result<Page<PlaylistTrack>, failure::Error> {
-        let mut params = HashMap::new();
+//        let mut params = HashMap::new();
+        let mut params = BTreeMap::new();
         params.insert("limit".to_owned(), limit.into().unwrap_or(50).to_string());
         params.insert("offset".to_owned(), offset.into().unwrap_or(0).to_string());
         if let Some(_market) = market {
@@ -590,10 +670,52 @@ impl Spotify {
         if let Some(_fields) = fields {
             params.insert("fields".to_owned(), _fields.to_string());
         }
+
+        let mut s = DefaultHasher::new();
+
+        let mut hashmap = HashMap::new();
+
+        for (key, value) in params.clone().iter() {
+            hashmap.insert(key.clone(), value.clone());
+        }
+
+        params.hash(&mut s);
+
+//        let hashmap: HashMap<String, String> = params.clone().iter().collect();
+
+//        BTreeMap::new();
+
         let plid = self.get_id(Type::Playlist, playlist_id);
         let url = format!("users/{}/playlists/{}/tracks", user_id, plid);
-        let result = self.get(&url, &mut params);
-        self.convert_result::<Page<PlaylistTrack>>(&result.unwrap_or_default())
+
+        url.hash(&mut s);
+
+        let hash = s.finish();
+
+        let arc = Arc::clone(&self.cache);
+        let lock = &*arc;
+
+        if let Some(page) = lock.read().unwrap().get(&hash) {
+            return Ok(page.clone())
+        }
+
+        let result = self.get_etag(&url, &mut hashmap);
+
+        let etag: Option<String> = result.as_ref().ok()
+            .and_then(|e| e.clone().1);
+
+        let object = self.convert_result::<Page<PlaylistTrack>>(result.unwrap_or_default().0.as_str());
+
+        if let Ok(page) = &object {
+            if let Some(_etag) = etag {
+                let cache = Arc::clone(&self.cache);
+                let lock = &*cache;
+
+                lock.write().unwrap().insert(hash, page.clone());
+            }
+        }
+
+        return object;
     }
 
 

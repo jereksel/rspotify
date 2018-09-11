@@ -3,6 +3,7 @@ extern crate rspotify;
 use rspotify::spotify::util::get_token;
 use rspotify::spotify::client::Spotify;
 use rspotify::spotify::oauth2::{SpotifyClientCredentials, SpotifyOAuth};
+use std::time::Instant;
 
 fn main() {
     // Set client_id and client_secret in .env file or
@@ -34,10 +35,44 @@ fn main() {
                 .build();
             let user_id = "spotify";
             let playlist_id = String::from("spotify:playlist:59ZbFPES4DQwEjBpWHzrtC");
-            let playlists =
-                spotify.user_playlist_tracks(user_id, &playlist_id, None, Some(2), None, None);
-            println!("{:?}", playlists);
 
+            {
+                let start = Instant::now();
+                let playlists =
+                    spotify.user_playlist_tracks(user_id, &playlist_id, None, None, None, None);
+                let elapsed = start.elapsed();
+//                println!("{:?}", playlists);
+                println!("All tracks: {:?}", elapsed);
+            }
+
+
+            {
+                let start = Instant::now();
+                let playlists =
+                    spotify.user_playlist_tracks(user_id, &playlist_id, None, None, None, None);
+                let elapsed = start.elapsed();
+//                println!("{:?}", playlists);
+                println!("All tracks: {:?}", elapsed);
+            }
+
+
+            {
+                let start = Instant::now();
+                let playlists =
+                    spotify.user_playlist_tracks(user_id, &playlist_id, None, None, None, None);
+                let elapsed = start.elapsed();
+//                println!("{:?}", playlists);
+                println!("All tracks: {:?}", elapsed);
+            }
+
+            {
+                let start = Instant::now();
+                let playlists =
+                    spotify.user_playlist_tracks(user_id, &playlist_id, None, None, None, None);
+                let elapsed = start.elapsed();
+//                println!("{:?}", playlists);
+                println!("All tracks: {:?}", elapsed);
+            }
         }
         None => println!("auth failed"),
     };
