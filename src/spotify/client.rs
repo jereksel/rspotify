@@ -1,4 +1,7 @@
 //! Client to Spotify API endpoint
+
+extern crate lru;
+extern crate std;
 // 3rd-part library
 use serde_json;
 use serde_json::Value;
@@ -20,7 +23,9 @@ use std::borrow::Borrow;
 
 use std::collections::hash_map::DefaultHasher;
 
-extern crate std;
+use self::lru::LruCache;
+
+use reqwest::StatusCode::NotModified;
 
 use super::oauth2::SpotifyClientCredentials;
 use super::senum::{AlbumType, Type, TimeRange, Country, RepeatState, SearchType};
@@ -46,18 +51,19 @@ use core::borrow::BorrowMut;
 use std::collections::BTreeMap;
 use std::hash::Hash;
 use std::hash::Hasher;
+use itertools::Either;
 
 lazy_static! {
     /// HTTP Client
     pub static ref CLIENT: Client = Client::new();
 }
 /// Spotify API object
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Spotify {
     pub prefix: String,
     pub access_token: Option<String>,
     pub client_credentials_manager: Option<SpotifyClientCredentials>,
-    cache: Arc<RwLock<HashMap<u64, Page<PlaylistTrack>>>>
+    cache: Arc<RwLock<LruCache<(BTreeMap<String, String>, String), (String, Page<PlaylistTrack>)>>>
 }
 impl Spotify {
     //! If you want to check examples of all API endpoint, you could check the
@@ -67,7 +73,7 @@ impl Spotify {
             prefix: "https://api.spotify.com/v1/".to_owned(),
             access_token: None,
             client_credentials_manager: None,
-            cache: Arc::new(RwLock::new(HashMap::new()))
+            cache: Arc::new(RwLock::new(LruCache::new(10)))
         }
     }
 
@@ -150,7 +156,7 @@ impl Spotify {
         }
     }
 
-    fn internal_call_etag(&self, method: Method, url: &str, payload: Option<&Value>) -> Result<(String, Option<String>), failure::Error> {
+    fn internal_call_etag(&self, method: Method, url: &str, payload: Option<&Value>, etag: Option<String>) -> Result<Either<(), (String, Option<String>)>, failure::Error> {
         let mut url: Cow<str> = url.into();
         if !url.starts_with("http") {
             url = ["https://api.spotify.com/v1/", &url].concat().into();
@@ -159,6 +165,11 @@ impl Spotify {
         let mut headers = Headers::new();
         headers.set(self.auth_headers());
         headers.set(ContentType::json());
+
+        if let Some(_etag) = etag {
+            headers.append_raw("If-None-Match", _etag);
+//            headers.set("If-None-Match", _etag);
+        }
 
         let mut response = {
             let mut builder = CLIENT.request(method, &url.into_owned());
@@ -187,8 +198,10 @@ impl Spotify {
 
         println!("{:?}", etag);
 
-        if response.status().is_success() {
-            Ok((buf, etag))
+        if response.status() == NotModified {
+            Ok(Either::Left(()))
+        } else if response.status().is_success() {
+            Ok(Either::Right((buf, etag)))
         } else {
             eprintln!("parameters: {:?}", &payload);
             eprintln!("response: {:?}", &response);
@@ -213,15 +226,15 @@ impl Spotify {
     }
 
     ///send get request
-    fn get_etag(&self, url: &str, params: &mut HashMap<String, String>) -> Result<(String, Option<String>), failure::Error> {
+    fn get_etag(&self, url: &str, params: &mut HashMap<String, String>, etag: Option<String>) -> Result<Either<(), (String, Option<String>)>, failure::Error> {
         if !params.is_empty() {
             let param: String = convert_map_to_string(params);
             let mut url_with_params = url.to_owned();
             url_with_params.push('?');
             url_with_params.push_str(&param);
-            self.internal_call_etag(Get, &url_with_params, None)
+            self.internal_call_etag(Get, &url_with_params, None, etag)
         } else {
-            self.internal_call_etag(Get, url, None)
+            self.internal_call_etag(Get, url, None, etag)
         }
     }
 
@@ -681,10 +694,6 @@ impl Spotify {
 
         params.hash(&mut s);
 
-//        let hashmap: HashMap<String, String> = params.clone().iter().collect();
-
-//        BTreeMap::new();
-
         let plid = self.get_id(Type::Playlist, playlist_id);
         let url = format!("users/{}/playlists/{}/tracks", user_id, plid);
 
@@ -695,27 +704,53 @@ impl Spotify {
         let arc = Arc::clone(&self.cache);
         let lock = &*arc;
 
-        if let Some(page) = lock.read().unwrap().get(&hash) {
-            return Ok(page.clone())
-        }
+        let r: Option<(String, Page<PlaylistTrack>)> = lock.write().unwrap().get(&(params.clone(), url.clone())).map(|a| a.clone());
 
-        let result = self.get_etag(&url, &mut hashmap);
+        let etag = r.as_ref().map(|a| a.0.clone());
 
-        let etag: Option<String> = result.as_ref().ok()
-            .and_then(|e| e.clone().1);
+        let result = self.get_etag(&url, &mut hashmap, etag);
 
-        let object = self.convert_result::<Page<PlaylistTrack>>(result.unwrap_or_default().0.as_str());
+        match result {
 
-        if let Ok(page) = &object {
-            if let Some(_etag) = etag {
-                let cache = Arc::clone(&self.cache);
-                let lock = &*cache;
+            Ok(either) => {
 
-                lock.write().unwrap().insert(hash, page.clone());
+                match either {
+
+                    Either::Left(_) => {
+                        Ok(r.unwrap().1)
+                    }
+
+                    Either::Right(result) => {
+
+                        let (json, etag) = result;
+
+                        let object = self.convert_result::<Page<PlaylistTrack>>(&json);
+
+                        if let Some(_etag) = etag {
+                            if let Ok(_object) = object.as_ref() {
+                                let cache = Arc::clone(&self.cache);
+                                let lock = &*cache;
+
+                                lock.write().unwrap().put((params, url.clone()), (_etag, _object.clone()));
+                            }
+
+//                            lock.write().unwrap().put(hash, page.clone());
+                        }
+
+                        object
+
+                    }
+
+                }
+
+
+            },
+            Err(e) => {
+                Err(e)
             }
+
         }
 
-        return object;
     }
 
 

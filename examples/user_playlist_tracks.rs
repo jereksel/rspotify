@@ -35,11 +35,22 @@ fn main() {
                 .build();
             let user_id = "spotify";
             let playlist_id = String::from("spotify:playlist:59ZbFPES4DQwEjBpWHzrtC");
+            let playlist_id_2 = String::from("spotify:playlist:37i9dQZF1DWXDJDWnzE39E");
 
             {
                 let start = Instant::now();
                 let playlists =
                     spotify.user_playlist_tracks(user_id, &playlist_id, None, None, None, None);
+                let elapsed = start.elapsed();
+//                println!("{:?}", playlists);
+                println!("All tracks: {:?}", elapsed);
+            }
+
+
+            {
+                let start = Instant::now();
+                let playlists =
+                    spotify.user_playlist_tracks(user_id, &playlist_id_2, None, None, None, None);
                 let elapsed = start.elapsed();
 //                println!("{:?}", playlists);
                 println!("All tracks: {:?}", elapsed);
@@ -55,20 +66,10 @@ fn main() {
                 println!("All tracks: {:?}", elapsed);
             }
 
-
             {
                 let start = Instant::now();
                 let playlists =
-                    spotify.user_playlist_tracks(user_id, &playlist_id, None, None, None, None);
-                let elapsed = start.elapsed();
-//                println!("{:?}", playlists);
-                println!("All tracks: {:?}", elapsed);
-            }
-
-            {
-                let start = Instant::now();
-                let playlists =
-                    spotify.user_playlist_tracks(user_id, &playlist_id, None, None, None, None);
+                    spotify.user_playlist_tracks(user_id, &playlist_id_2, None, None, None, None);
                 let elapsed = start.elapsed();
 //                println!("{:?}", playlists);
                 println!("All tracks: {:?}", elapsed);
